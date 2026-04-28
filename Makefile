@@ -1,5 +1,7 @@
 NAME=mihomo
+SERVER_NAME=encrypted-socks5-server
 BINDIR=bin
+GOEXE=$(shell go env GOEXE)
 BRANCH=$(shell git branch --show-current)
 ifeq ($(BRANCH),Alpha)
 VERSION=alpha-$(shell git rev-parse --short HEAD)
@@ -15,6 +17,17 @@ BUILDTIME=$(shell date -u)
 GOBUILD=CGO_ENABLED=0 go build -tags with_gvisor -trimpath -ldflags '-X "github.com/metacubex/mihomo/constant.Version=$(VERSION)" \
 		-X "github.com/metacubex/mihomo/constant.BuildTime=$(BUILDTIME)" \
 		-w -s -buildid='
+
+.PHONY: build build-server
+
+build:
+	mkdir -p $(BINDIR)
+	$(GOBUILD) -o $(BINDIR)/$(NAME)$(GOEXE) .
+	$(GOBUILD) -o $(BINDIR)/$(SERVER_NAME)$(GOEXE) ./cmd/$(SERVER_NAME)
+
+build-server:
+	mkdir -p $(BINDIR)
+	$(GOBUILD) -o $(BINDIR)/$(SERVER_NAME)$(GOEXE) ./cmd/$(SERVER_NAME)
 
 PLATFORM_LIST = \
 	darwin-386 \

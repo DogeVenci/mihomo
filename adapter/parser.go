@@ -47,6 +47,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewSocks5(*socksOption)
+	case "encrypted-socks5":
+		encryptedSocksOption := &outbound.EncryptedSocks5Option{BasicOption: basicOption}
+		err = decoder.Decode(mapping, encryptedSocksOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewEncryptedSocks5(*encryptedSocksOption)
 	case "http":
 		httpOption := &outbound.HttpOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, httpOption)
