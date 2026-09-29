@@ -285,7 +285,7 @@ func (wsedc *websocketWithEarlyDataConn) SetReadDeadline(t time.Time) error {
 func (wsedc *websocketWithEarlyDataConn) SetWriteDeadline(t time.Time) error {
 	select {
 	case <-wsedc.dialed:
-		return wsedc.conn.SetReadDeadline(t)
+		return wsedc.conn.SetWriteDeadline(t)
 	default:
 		return nil
 	}
@@ -587,11 +587,11 @@ func StreamUpgradedWebsocketConn(w http.ResponseWriter, r *http.Request) (net.Co
 	}
 
 	if edBuf := decodeXray0rtt(r.Header); len(edBuf) > 0 {
-		appendOk := false
+		// The header carries the first application bytes, so they must precede
+		// any subsequent data already buffered by the HTTP reader.
 		if bufConn, ok := conn.(*N.BufferedConn); ok {
-			appendOk = bufConn.AppendData(edBuf)
-		}
-		if !appendOk {
+			bufConn.PrependData(edBuf)
+		} else {
 			conn = N.NewCachedConn(conn, edBuf)
 		}
 

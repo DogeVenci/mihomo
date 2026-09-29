@@ -5,19 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"time"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/tuic/common"
 
+	"github.com/metacubex/http"
 	"github.com/metacubex/quic-go"
 	qtls "github.com/metacubex/sing-quic"
 	"github.com/metacubex/sing-quic/hysteria2"
+	"github.com/metacubex/sing-quic/hysteria2/realm"
 	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/tls"
 )
@@ -34,32 +38,55 @@ type Hysteria2 struct {
 
 type Hysteria2Option struct {
 	BasicOption
-	Name           string     `proxy:"name"`
-	Server         string     `proxy:"server"`
-	Port           int        `proxy:"port,omitempty"`
-	Ports          string     `proxy:"ports,omitempty"`
-	HopInterval    string     `proxy:"hop-interval,omitempty"`
-	Up             string     `proxy:"up,omitempty"`
-	Down           string     `proxy:"down,omitempty"`
-	Password       string     `proxy:"password,omitempty"`
-	Obfs           string     `proxy:"obfs,omitempty"`
-	ObfsPassword   string     `proxy:"obfs-password,omitempty"`
-	SNI            string     `proxy:"sni,omitempty"`
-	ECHOpts        ECHOptions `proxy:"ech-opts,omitempty"`
-	SkipCertVerify bool       `proxy:"skip-cert-verify,omitempty"`
-	Fingerprint    string     `proxy:"fingerprint,omitempty"`
-	Certificate    string     `proxy:"certificate,omitempty"`
-	PrivateKey     string     `proxy:"private-key,omitempty"`
-	ALPN           []string   `proxy:"alpn,omitempty"`
-	CWND           int        `proxy:"cwnd,omitempty"`
-	BBRProfile     string     `proxy:"bbr-profile,omitempty"`
-	UdpMTU         int        `proxy:"udp-mtu,omitempty"`
+	Name              string     `proxy:"name"`
+	Server            string     `proxy:"server"`
+	Port              int        `proxy:"port,omitempty"`
+	Ports             string     `proxy:"ports,omitempty"`
+	HopInterval       string     `proxy:"hop-interval,omitempty"`
+	Up                string     `proxy:"up,omitempty"`
+	Down              string     `proxy:"down,omitempty"`
+	Password          string     `proxy:"password,omitempty"`
+	Obfs              string     `proxy:"obfs,omitempty"`
+	ObfsPassword      string     `proxy:"obfs-password,omitempty"`
+	ObfsMinPacketSize int        `proxy:"obfs-min-packet-size,omitempty"`
+	ObfsMaxPacketSize int        `proxy:"obfs-max-packet-size,omitempty"`
+	SNI               string     `proxy:"sni,omitempty"`
+	ECHOpts           ECHOptions `proxy:"ech-opts,omitempty"`
+	SkipCertVerify    bool       `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify    string     `proxy:"name-cert-verify,omitempty"`
+	Fingerprint       string     `proxy:"fingerprint,omitempty"`
+	Certificate       string     `proxy:"certificate,omitempty"`
+	PrivateKey        string     `proxy:"private-key,omitempty"`
+	ALPN              []string   `proxy:"alpn,omitempty"`
+	CWND              int        `proxy:"cwnd,omitempty"`
+	BBRProfile        string     `proxy:"bbr-profile,omitempty"`
+	UdpMTU            int        `proxy:"udp-mtu,omitempty"`
+	HandshakeTimeout  int        `proxy:"handshake-timeout,omitempty"`
+
+	RealmOpts Hysteria2RealmOption `proxy:"realm-opts,omitempty"`
 
 	// quic-go special config
 	InitialStreamReceiveWindow     uint64 `proxy:"initial-stream-receive-window,omitempty"`
 	MaxStreamReceiveWindow         uint64 `proxy:"max-stream-receive-window,omitempty"`
 	InitialConnectionReceiveWindow uint64 `proxy:"initial-connection-receive-window,omitempty"`
 	MaxConnectionReceiveWindow     uint64 `proxy:"max-connection-receive-window,omitempty"`
+}
+
+type Hysteria2RealmOption struct {
+	Enable      bool     `proxy:"enable,omitempty"`
+	ServerURL   string   `proxy:"server-url,omitempty"`
+	Token       string   `proxy:"token,omitempty"`
+	RealmID     string   `proxy:"realm-id,omitempty"`
+	STUNServers []string `proxy:"stun-servers,omitempty"`
+
+	// for ServerURL
+	SNI            string   `proxy:"sni,omitempty"`
+	SkipCertVerify bool     `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify string   `proxy:"name-cert-verify,omitempty"`
+	Fingerprint    string   `proxy:"fingerprint,omitempty"`
+	Certificate    string   `proxy:"certificate,omitempty"`
+	PrivateKey     string   `proxy:"private-key,omitempty"`
+	ALPN           []string `proxy:"alpn,omitempty"`
 }
 
 func (h *Hysteria2) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -81,7 +108,7 @@ func (h *Hysteria2) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 	if pc == nil {
 		return nil, errors.New("packetConn is nil")
 	}
-	return newPacketConn(N.NewThreadSafePacketConn(pc), h), nil
+	return NewPacketConn(N.NewThreadSafePacketConn(pc), h), nil
 }
 
 // Close implements C.ProxyAdapter
@@ -117,6 +144,8 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 
 	var salamanderPassword string
+	var geckoPassword string
+	var geckoMinPacketSize, geckoMaxPacketSize int
 	if len(option.Obfs) > 0 {
 		if option.ObfsPassword == "" {
 			return nil, errors.New("missing obfs password")
@@ -124,6 +153,10 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 		switch option.Obfs {
 		case hysteria2.ObfsTypeSalamander:
 			salamanderPassword = option.ObfsPassword
+		case hysteria2.ObfsTypeGecko:
+			geckoPassword = option.ObfsPassword
+			geckoMinPacketSize = option.ObfsMinPacketSize
+			geckoMaxPacketSize = option.ObfsMaxPacketSize
 		default:
 			return nil, fmt.Errorf("unknown obfs type: %s", option.Obfs)
 		}
@@ -140,9 +173,10 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 			InsecureSkipVerify: option.SkipCertVerify,
 			MinVersion:         tls.VersionTLS13,
 		},
-		Fingerprint: option.Fingerprint,
-		Certificate: option.Certificate,
-		PrivateKey:  option.PrivateKey,
+		Fingerprint:    option.Fingerprint,
+		NameCertVerify: option.NameCertVerify,
+		Certificate:    option.Certificate,
+		PrivateKey:     option.PrivateKey,
 	})
 	if err != nil {
 		return nil, err
@@ -174,9 +208,12 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 	clientOptions := hysteria2.ClientOptions{
 		Context:            context.TODO(),
 		Logger:             log.SingLogger,
-		SendBPS:            StringToBps(option.Up),
-		ReceiveBPS:         StringToBps(option.Down),
+		SendBPS:            utils.StringToBps(option.Up),
+		ReceiveBPS:         utils.StringToBps(option.Down),
 		SalamanderPassword: salamanderPassword,
+		GeckoPassword:      geckoPassword,
+		GeckoMinPacketSize: geckoMinPacketSize,
+		GeckoMaxPacketSize: geckoMaxPacketSize,
 		Password:           option.Password,
 		TLSConfig:          tlsClientConfig,
 		QUICConfig:         quicConfig,
@@ -189,11 +226,12 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 			if err != nil {
 				return nil, nil, err
 			}
-			return common.DialQuic(ctx, addr, outbound.DialOptions(), dialer, tlsCfg, cfg, early)
+			return common.DialQuic(ctx, addr, outbound.DialOptions(), dialer, tlsCfg, cfg, common.DialQuicOption{Early: early})
 		}),
 		SetBBRCongestion: func(quicConn *quic.Conn) {
 			common.SetCongestionController(quicConn, "bbr", option.CWND, option.BBRProfile)
 		},
+		HandshakeTimeout: time.Duration(option.HandshakeTimeout) * time.Second,
 	}
 
 	var serverPorts []uint16
@@ -227,6 +265,50 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 	}
 	if option.Port == 0 && len(serverPorts) == 0 {
 		return nil, errors.New("invalid port")
+	}
+
+	if option.RealmOpts.Enable {
+		httpTLSClientConfig, err := ca.GetTLSConfig(ca.Option{
+			TLSConfig: &tls.Config{
+				ServerName:         option.RealmOpts.SNI,
+				InsecureSkipVerify: option.RealmOpts.SkipCertVerify,
+				NextProtos:         option.RealmOpts.ALPN,
+			},
+			Fingerprint:    option.RealmOpts.Fingerprint,
+			NameCertVerify: option.RealmOpts.NameCertVerify,
+			Certificate:    option.RealmOpts.Certificate,
+			PrivateKey:     option.RealmOpts.PrivateKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+		clientOptions.RealmOptions = &realm.Options{
+			ServerURL:   option.RealmOpts.ServerURL,
+			Token:       option.RealmOpts.Token,
+			RealmID:     option.RealmOpts.RealmID,
+			STUNServers: option.RealmOpts.STUNServers,
+			HTTPClient: &http.Client{
+				Transport: &http.Transport{
+					DialContext:     outbound.dialer.DialContext,
+					TLSClientConfig: httpTLSClientConfig,
+					// from http.DefaultTransport
+					ForceAttemptHTTP2:     true,
+					MaxIdleConns:          100,
+					IdleConnTimeout:       90 * time.Second,
+					TLSHandshakeTimeout:   10 * time.Second,
+					ExpectContinueTimeout: 1 * time.Second,
+				},
+			},
+			Resolver: func(ctx context.Context, host string, ipv4, ipv6 bool) ([]netip.Addr, error) {
+				if ipv4 && !ipv6 {
+					return resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver)
+				} else if ipv6 && !ipv4 {
+					return resolver.LookupIPv6WithResolver(ctx, host, resolver.ProxyServerHostResolver)
+				}
+				return resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
+			},
+			Logger: log.SingLogger,
+		}
 	}
 
 	client, err := hysteria2.NewClient(clientOptions)

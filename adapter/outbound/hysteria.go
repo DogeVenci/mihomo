@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/ech"
@@ -19,7 +20,7 @@ import (
 	"github.com/metacubex/mihomo/transport/hysteria/obfs"
 	"github.com/metacubex/mihomo/transport/hysteria/pmtud_fix"
 	"github.com/metacubex/mihomo/transport/hysteria/transport"
-	"github.com/metacubex/mihomo/transport/hysteria/utils"
+	hyUtils "github.com/metacubex/mihomo/transport/hysteria/utils"
 
 	"github.com/metacubex/tls"
 
@@ -66,10 +67,10 @@ func (h *Hysteria) ListenPacketContext(ctx context.Context, metadata *C.Metadata
 	if err != nil {
 		return nil, err
 	}
-	return newPacketConn(&hyPacketConn{udpConn}, h), nil
+	return NewPacketConn(&hyPacketConn{udpConn}, h), nil
 }
 
-func (h *Hysteria) genHdc(ctx context.Context) utils.PacketDialer {
+func (h *Hysteria) genHdc(ctx context.Context) hyUtils.PacketDialer {
 	return &hyDialerWithContext{
 		ctx: context.Background(),
 		hyDialer: func(network string, rAddr net.Addr) (net.PacketConn, error) {
@@ -115,6 +116,7 @@ type HysteriaOption struct {
 	SNI                 string     `proxy:"sni,omitempty"`
 	ECHOpts             ECHOptions `proxy:"ech-opts,omitempty"`
 	SkipCertVerify      bool       `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify      string     `proxy:"name-cert-verify,omitempty"`
 	Fingerprint         string     `proxy:"fingerprint,omitempty"`
 	Certificate         string     `proxy:"certificate,omitempty"`
 	PrivateKey          string     `proxy:"private-key,omitempty"`
@@ -128,12 +130,12 @@ type HysteriaOption struct {
 
 func (c *HysteriaOption) Speed() (uint64, uint64, error) {
 	var up, down uint64
-	up = StringToBps(c.Up)
+	up = utils.StringToBps(c.Up)
 	if up == 0 {
 		return 0, 0, fmt.Errorf("invaild upload speed: %s", c.Up)
 	}
 
-	down = StringToBps(c.Down)
+	down = utils.StringToBps(c.Down)
 	if down == 0 {
 		return 0, 0, fmt.Errorf("invaild download speed: %s", c.Down)
 	}
@@ -157,9 +159,10 @@ func NewHysteria(option HysteriaOption) (*Hysteria, error) {
 			InsecureSkipVerify: option.SkipCertVerify,
 			MinVersion:         tls.VersionTLS13,
 		},
-		Fingerprint: option.Fingerprint,
-		Certificate: option.Certificate,
-		PrivateKey:  option.PrivateKey,
+		Fingerprint:    option.Fingerprint,
+		NameCertVerify: option.NameCertVerify,
+		Certificate:    option.Certificate,
+		PrivateKey:     option.PrivateKey,
 	})
 	if err != nil {
 		return nil, err

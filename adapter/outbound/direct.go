@@ -46,12 +46,12 @@ func (d *Direct) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 	if err != nil {
 		return nil, err
 	}
-	return d.loopBack.NewPacketConn(newPacketConn(pc, d)), nil
+	return d.loopBack.NewPacketConn(NewPacketConn(pc, d)), nil
 }
 
 func (d *Direct) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	if (!metadata.Resolved() || resolver.DirectHostResolver != resolver.DefaultResolver) && metadata.Host != "" {
-		ip, err := resolver.ResolveIPWithResolver(ctx, metadata.Host, resolver.DirectHostResolver)
+		ip, err := resolveIPWithResolver(ctx, metadata.Host, d.prefer, resolver.DirectHostResolver)
 		if err != nil {
 			return fmt.Errorf("can't resolve ip: %w", err)
 		}
