@@ -37,6 +37,7 @@ type server struct {
 	username   string
 	password   string
 	udpTimeout time.Duration
+	udpConn    net.PacketConn
 }
 
 type socksRequest struct {
@@ -68,11 +69,20 @@ func main() {
 func (s *server) serve() error {
 	ln, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.listenAddr, err)
+		return fmt.Errorf("listen tcp %s: %w", s.listenAddr, err)
 	}
 	defer ln.Close()
 
+	udpConn, err := net.ListenPacket("udp", s.listenAddr)
+	if err != nil {
+		return fmt.Errorf("listen udp %s: %w", s.listenAddr, err)
+	}
+	defer udpConn.Close()
+	s.udpConn = udpConn
+	go s.serveUDP(udpConn)
+
 	log.Printf("encrypted-socks5 server listening on %s", s.listenAddr)
+	log.Printf("encrypted-socks5 UDP relay listening on %s", udpConn.LocalAddr())
 
 	for {
 		conn, err := ln.Accept()
@@ -123,42 +133,26 @@ func (s *server) handleConnect(client net.Conn, clientAddr net.Addr, targetAddr 
 }
 
 func (s *server) handleUDPAssociate(client net.Conn, clientAddr net.Addr) {
-	udpConn, err := net.ListenPacket("udp", s.listenAddr)
-	if err != nil {
+	if s.udpConn == nil {
 		_ = writeReply(client, replyGeneralFailure, nil)
-		log.Printf("udp listen: %v", err)
+		log.Printf("udp associate requested before UDP listener is ready")
 		return
 	}
-	defer udpConn.Close()
 
-	if err := writeReply(client, replySucceeded, udpConn.LocalAddr()); err != nil {
+	if err := writeReply(client, replySucceeded, s.udpConn.LocalAddr()); err != nil {
 		log.Printf("write UDP associate reply to %s: %v", clientAddr, err)
 		return
 	}
 
-	log.Printf("udp associate %s -> %s", clientAddr, udpConn.LocalAddr())
-	done := make(chan struct{})
-	go s.serveUDPAssociation(udpConn, done)
-
+	log.Printf("udp associate %s -> %s", clientAddr, s.udpConn.LocalAddr())
 	_, _ = io.Copy(io.Discard, client)
-	close(done)
 }
 
-func (s *server) serveUDPAssociation(pc net.PacketConn, done <-chan struct{}) {
+func (s *server) serveUDP(pc net.PacketConn) {
 	buf := make([]byte, 64*1024)
 	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-
-		_ = pc.SetReadDeadline(time.Now().Add(time.Second))
 		n, clientAddr, err := pc.ReadFrom(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
 			log.Printf("udp read: %v", err)
 			return
 		}
